@@ -1183,6 +1183,8 @@ int rds_sendmsg(struct socket *sock, struct msghdr *msg, size_t payload_len)
 	int num_sgs = DIV_ROUND_UP(payload_len, PAGE_SIZE);
 	int namelen;
 	struct rds_iov_vector_arr vct;
+	bool no_space;
+	unsigned long flags;
 	int ind;
 
 	memset(&vct, 0, sizeof(vct));
@@ -1316,6 +1318,25 @@ int rds_sendmsg(struct socket *sock, struct msghdr *msg, size_t payload_len)
 	if (payload_len > rds_sk_sndbuf(rs)) {
 		ret = -EMSGSIZE;
 		goto out;
+	}
+
+	/*
+	 * Avoid copying the message from user-space if we already
+	 * know there's no space in the send buffer.
+	 * The check is a negated version of the condition used inside
+	 * function "rds_send_queue_rm": "if (rs->rs_snd_bytes < rds_sk_sndbuf(rs))",
+	 * which needs some reconsideration, as it unexpectedly checks
+	 * if half of the send-buffer space is available, instead of
+	 * checking if the given message would fit.
+	 */
+	if (nonblock) {
+		spin_lock_irqsave(&rs->rs_lock, flags);
+		no_space = rs->rs_snd_bytes >= rds_sk_sndbuf(rs);
+		spin_unlock_irqrestore(&rs->rs_lock, flags);
+		if (no_space) {
+			ret = -EAGAIN;
+			goto out;
+		}
 	}
 
 	if (zcopy) {
