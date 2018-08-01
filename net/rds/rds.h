@@ -164,7 +164,18 @@ struct rds_connection {
 	u8			c_tos;
 
 	struct list_head	c_map_item;
+
+	/* c_map_queued: bit map field */
 	unsigned long		c_map_queued;
+
+	/**	bit 0: set indicates congestion update
+	 *		pending to send to peer.
+	 *	bit 1: set indicates last alloc attempt(GFP_NOWAIT)
+	 *		for congestion update message failed
+	 *		and update was deferred
+	 */
+#define RCMQ_BITOFF_CONGU_PENDING	0
+#define RCMQ_BITOFF_CONGU_ALLOC_DEFER	1
 
 	struct rds_conn_path	*c_path;
 	wait_queue_head_t	c_hs_waitq; /* handshake waitq */

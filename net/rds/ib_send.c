@@ -298,7 +298,7 @@ void rds_ib_send_cqe_handler(struct rds_ib_connection *ic, struct ib_wc *wc)
 	rds_ib_sub_signaled(ic, nr_sig);
 
 	if (test_and_clear_bit(RDS_LL_SEND_FULL, &conn->c_flags) ||
-	    test_bit(0, &conn->c_map_queued))
+	    test_bit(RCMQ_BITOFF_CONGU_PENDING, &conn->c_map_queued))
 		queue_delayed_work(conn->c_path->cp_wq, &conn->c_send_w, 0);
 
 	/* We expect errors as the qp is drained during shutdown */
