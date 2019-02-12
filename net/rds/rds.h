@@ -433,7 +433,7 @@ struct rds_message {
 	/* Never access m_rs without holding m_rs_lock.
 	 * Lock nesting is
 	 *  rm->m_rs_lock
-	 *   -> rs->rs_lock
+	 *   -> rs->rs_lock or rs->rs_snd_lock
 	 */
 	spinlock_t		m_rs_lock;
 	wait_queue_head_t	m_flush_wait;
@@ -626,6 +626,13 @@ struct rds_transport {
 #define RDS_BOUND_KEY_LEN \
 	(sizeof(struct in6_addr) + sizeof(__u32) + sizeof(__be16))
 
+/* Used to store per peer socket buffer info. */
+struct rs_buf_info {
+	struct in6_addr		rsbi_key;
+	struct rhash_head	rsbi_link;
+	u32			rsbi_snd_bytes;
+};
+
 struct rds_sock {
 	struct sock		rs_sk;
 
@@ -659,28 +666,37 @@ struct rds_sock {
 	/* seen congestion (ENOBUFS) when sending? */
 	int			rs_seen_congestion;
 
-	/* rs_lock protects all these adjacent members before the newline */
-	spinlock_t		rs_lock;
-	struct list_head	rs_send_queue;
-	u32			rs_snd_bytes;
-	int			rs_rcv_bytes;
-	struct list_head	rs_notify_queue;	/* currently used for failed RDMAs */
-
-	/* Congestion wake_up. If rs_cong_monitor is set, we use cong_mask
+	/* rs_lock protects all these adjacent members before the newline.
+	 *
+	 * Congestion wake_up. If rs_cong_monitor is set, we use cong_mask
 	 * to decide whether the application should be woken up.
 	 * If not set, we use rs_cong_track to find out whether a cong map
 	 * update arrived.
 	 */
+	spinlock_t		rs_lock;
 	uint64_t		rs_cong_mask;
 	uint64_t		rs_cong_notify;
 	struct list_head	rs_cong_list;
 	unsigned long		rs_cong_track;
+	/* currently used for failed RDMAs */
+	struct list_head	rs_notify_queue;
+
+	/* rs_snd_lock protects all these adjacent members before the
+	 * newline
+	 */
+	spinlock_t		rs_snd_lock;
+	struct list_head	rs_send_queue;
+	u64			rs_snd_bytes; /* Total bytes to all peers */
+	struct mutex		rs_buf_info_lock;
+	u32			rs_buf_info_dest_cnt;
+	struct rhashtable	rs_buf_info_tbl;
 
 	/*
 	 * rs_recv_lock protects the receive queue, and is
 	 * used to serialize with rds_release.
 	 */
 	rwlock_t		rs_recv_lock;
+	int			rs_rcv_bytes;
 	struct list_head	rs_recv_queue;
 
 	/* just for stats reporting */
@@ -766,6 +782,27 @@ struct rds_statistics {
 };
 
 /* af_rds.c */
+#define	RDS_SOCK_BUF_INFO_HTBL_SIZE	512
+static const struct rhashtable_params rs_buf_info_params = {
+	.nelem_hint = RDS_SOCK_BUF_INFO_HTBL_SIZE,
+	.key_len = sizeof(struct in6_addr),
+	.key_offset = offsetof(struct rs_buf_info, rsbi_key),
+	.head_offset = offsetof(struct rs_buf_info, rsbi_link),
+};
+
+/* Maximum number of peers a socket can communicate with */
+extern unsigned int rds_sock_max_peers;
+
+struct rs_buf_info *rds_add_buf_info(struct rds_sock *rs,
+				     struct in6_addr *addr, int *ret,
+				     gfp_t gfp);
+static inline struct rs_buf_info *rds_get_buf_info(struct rds_sock *rs,
+						   struct in6_addr *addr)
+{
+	return rhashtable_lookup_fast(&rs->rs_buf_info_tbl, addr,
+				      rs_buf_info_params);
+}
+
 void rds_sock_addref(struct rds_sock *rs);
 void rds_sock_put(struct rds_sock *rs);
 void rds_wake_sk_sleep(struct rds_sock *rs);

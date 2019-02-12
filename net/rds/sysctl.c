@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2006 Oracle.  All rights reserved.
+ * Copyright (c) 2006, 2019 Oracle and/or its affiliates. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -49,6 +49,10 @@ unsigned int  rds_sysctl_max_unacked_bytes = (16 << 20);
 
 unsigned int rds_sysctl_ping_enable = 1;
 
+static unsigned int rds_sock_max_peers_min = 128;
+static unsigned int rds_sock_max_peers_max = 65536;
+unsigned int rds_sock_max_peers = 8192;
+
 static struct ctl_table rds_sysctl_rds_table[] = {
 	{
 		.procname       = "reconnect_min_delay_ms",
@@ -88,6 +92,15 @@ static struct ctl_table rds_sysctl_rds_table[] = {
 		.maxlen         = sizeof(int),
 		.mode           = 0644,
 		.proc_handler   = proc_dointvec,
+	},
+	{
+		.procname	= "sock_max_peers",
+		.data		= &rds_sock_max_peers,
+		.maxlen		= sizeof(rds_sock_max_peers),
+		.mode		= 0644,
+		.proc_handler	= proc_douintvec_minmax,
+		.extra1		= &rds_sock_max_peers_min,
+		.extra2		= &rds_sock_max_peers_max,
 	},
 };
 

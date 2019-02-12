@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2006, 2018 Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2006, 2019 Oracle and/or its affiliates. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -560,10 +560,29 @@ EXPORT_SYMBOL_GPL(rds_send_xmit);
 static void rds_send_sndbuf_remove(struct rds_sock *rs, struct rds_message *rm)
 {
 	u32 len = be32_to_cpu(rm->m_inc.i_hdr.h_len);
+	struct rs_buf_info *bufi;
 
-	assert_spin_locked(&rs->rs_lock);
+	assert_spin_locked(&rs->rs_snd_lock);
 
-	BUG_ON(rs->rs_snd_bytes < len);
+	bufi = rds_get_buf_info(rs, &rm->m_daddr);
+	/* bufi cannot be NULL as an address's rs_buf_info is never deleted. */
+	if (!bufi) {
+		pr_err_ratelimited("%s: cannot find bufi %pI6c/%d, %pI6c/%d\n",
+				   __func__, &rs->rs_bound_addr,
+				   ntohs(rs->rs_bound_port),
+				   &rs->rs_conn_addr, ntohs(rs->rs_conn_port));
+		return;
+	}
+	/* The following should not happen unless there is data corruption. */
+	if (bufi->rsbi_snd_bytes < len || rs->rs_snd_bytes < len) {
+		pr_err_ratelimited("%s: invalid len %u %pI6c/%d, %pI6c/%d\n",
+				   __func__, len, &rs->rs_bound_addr,
+				   ntohs(rs->rs_bound_port),
+				   &rs->rs_conn_addr, ntohs(rs->rs_conn_port));
+		return;
+	}
+
+	bufi->rsbi_snd_bytes -= len;
 	rs->rs_snd_bytes -= len;
 
 	if (rs->rs_snd_bytes == 0)
@@ -727,7 +746,7 @@ static void rds_send_remove_from_sock(struct list_head *messages, int status)
 		}
 		if (!rs)
 			goto unlock_and_drop;
-		spin_lock(&rs->rs_lock);
+		spin_lock(&rs->rs_snd_lock);
 
 		if (test_and_clear_bit(RDS_MSG_ON_SOCK, &rm->m_flags)) {
 			struct rm_rdma_op *ro = &rm->rdma;
@@ -735,19 +754,28 @@ static void rds_send_remove_from_sock(struct list_head *messages, int status)
 
 			list_del_init(&rm->m_sock_item);
 			rds_send_sndbuf_remove(rs, rm);
+			spin_unlock(&rs->rs_snd_lock);
 
 			if (ro->op_active && ro->op_notifier &&
 			       (ro->op_notify || (ro->op_recverr && status))) {
 				notifier = ro->op_notifier;
-				list_add_tail(&notifier->n_list,
-						&rs->rs_notify_queue);
 				if (!notifier->n_status)
 					notifier->n_status = status;
 				rm->rdma.op_notifier = NULL;
+
+				/*
+				 * Publish a fully initialized notifier while holding
+				 * the lock that protects rs_notify_queue.
+				 */
+				spin_lock(&rs->rs_lock);
+				list_add_tail(&notifier->n_list,
+					      &rs->rs_notify_queue);
+				spin_unlock(&rs->rs_lock);
 			}
 			was_on_sock = 1;
+		} else {
+			spin_unlock(&rs->rs_snd_lock);
 		}
-		spin_unlock(&rs->rs_lock);
 
 unlock_and_drop:
 		spin_unlock_irqrestore(&rm->m_rs_lock, flags);
@@ -814,8 +842,8 @@ void rds_send_drop_to(struct rds_sock *rs, struct sockaddr_in6 *dest)
 	unsigned long flags;
 	LIST_HEAD(list);
 
-	/* get all the messages we're dropping under the rs lock */
-	spin_lock_irqsave(&rs->rs_lock, flags);
+	/* get all the messages we're dropping under the rs_snd_lock */
+	spin_lock_irqsave(&rs->rs_snd_lock, flags);
 
 	list_for_each_entry_safe(rm, tmp, &rs->rs_send_queue, m_sock_item) {
 		if (dest &&
@@ -828,10 +856,10 @@ void rds_send_drop_to(struct rds_sock *rs, struct sockaddr_in6 *dest)
 		clear_bit(RDS_MSG_ON_SOCK, &rm->m_flags);
 	}
 
-	/* order flag updates with the rs lock */
+	/* order flag updates with the rs_snd_lock */
 	smp_mb__after_atomic();
 
-	spin_unlock_irqrestore(&rs->rs_lock, flags);
+	spin_unlock_irqrestore(&rs->rs_snd_lock, flags);
 
 	if (list_empty(&list))
 		return;
@@ -905,7 +933,8 @@ void rds_send_drop_to(struct rds_sock *rs, struct sockaddr_in6 *dest)
 static int rds_send_queue_rm(struct rds_sock *rs, struct rds_connection *conn,
 			     struct rds_conn_path *cp,
 			     struct rds_message *rm, __be16 sport,
-			     __be16 dport, int *queued)
+			     __be16 dport, int *queued,
+			     struct rs_buf_info *bufi)
 {
 	unsigned long flags;
 	u32 len;
@@ -915,9 +944,9 @@ static int rds_send_queue_rm(struct rds_sock *rs, struct rds_connection *conn,
 
 	len = be32_to_cpu(rm->m_inc.i_hdr.h_len);
 
-	/* this is the only place which holds both the socket's rs_lock
+	/* this is the only place which holds both the socket's rs_snd_lock
 	 * and the connection's c_lock */
-	spin_lock_irqsave(&rs->rs_lock, flags);
+	spin_lock_irqsave(&rs->rs_snd_lock, flags);
 
 	/*
 	 * If there is a little space in sndbuf, we don't queue anything,
@@ -927,7 +956,10 @@ static int rds_send_queue_rm(struct rds_sock *rs, struct rds_connection *conn,
 	 * rs_snd_bytes here to allow the last msg to exceed the buffer,
 	 * and poll() now knows no more data can be sent.
 	 */
-	if (rs->rs_snd_bytes < rds_sk_sndbuf(rs)) {
+	if (bufi->rsbi_snd_bytes < rds_sk_sndbuf(rs)) {
+		bufi->rsbi_snd_bytes += len;
+
+		/* Record the total number of snd_bytes of all peers. */
 		rs->rs_snd_bytes += len;
 
 		/* let recv side know we are close to send space exhaustion.
@@ -935,7 +967,7 @@ static int rds_send_queue_rm(struct rds_sock *rs, struct rds_connection *conn,
 		 * means we set the flag on *all* messages as soon as our
 		 * throughput hits a certain threshold.
 		 */
-		if (rs->rs_snd_bytes >= rds_sk_sndbuf(rs) / 2)
+		if (bufi->rsbi_snd_bytes >= rds_sk_sndbuf(rs) / 2)
 			set_bit(RDS_MSG_ACK_REQUIRED, &rm->m_flags);
 
 		list_add_tail(&rm->m_sock_item, &rs->rs_send_queue);
@@ -957,14 +989,15 @@ static int rds_send_queue_rm(struct rds_sock *rs, struct rds_connection *conn,
 		set_bit(RDS_MSG_ON_CONN, &rm->m_flags);
 		spin_unlock(&cp->cp_lock);
 
-		rdsdebug("queued msg %p len %d, rs %p bytes %d seq %llu\n",
-			 rm, len, rs, rs->rs_snd_bytes,
+		rdsdebug("queued msg %p len %d, rs %p bytes %llu (%u) seq %llu\n",
+			 rm, len, rs, (unsigned long long)rs->rs_snd_bytes,
+			 bufi->rsbi_snd_bytes,
 			 (unsigned long long)be64_to_cpu(rm->m_inc.i_hdr.h_sequence));
 
 		*queued = 1;
 	}
 
-	spin_unlock_irqrestore(&rs->rs_lock, flags);
+	spin_unlock_irqrestore(&rs->rs_snd_lock, flags);
 out:
 	return *queued;
 }
@@ -1175,6 +1208,7 @@ int rds_sendmsg(struct socket *sock, struct msghdr *msg, size_t payload_len)
 	int nonblock = msg->msg_flags & MSG_DONTWAIT;
 	long timeo = sock_sndtimeo(sk, nonblock);
 	struct rds_conn_path *cpath;
+	struct rs_buf_info *bufi;
 	struct in6_addr daddr;
 	__u32 scope_id = 0;
 	size_t rdma_payload_len = 0;
@@ -1320,19 +1354,24 @@ int rds_sendmsg(struct socket *sock, struct msghdr *msg, size_t payload_len)
 		goto out;
 	}
 
+	bufi = rds_add_buf_info(rs, &daddr, &ret, GFP_KERNEL);
+	if (!bufi)
+		goto out;
+
 	/*
 	 * Avoid copying the message from user-space if we already
 	 * know there's no space in the send buffer.
 	 * The check is a negated version of the condition used inside
-	 * function "rds_send_queue_rm": "if (rs->rs_snd_bytes < rds_sk_sndbuf(rs))",
+	 * function "rds_send_queue_rm":
+	 *     "if (bufi->rsbi_snd_bytes < rds_sk_sndbuf(rs))",
 	 * which needs some reconsideration, as it unexpectedly checks
 	 * if half of the send-buffer space is available, instead of
 	 * checking if the given message would fit.
 	 */
 	if (nonblock) {
-		spin_lock_irqsave(&rs->rs_lock, flags);
-		no_space = rs->rs_snd_bytes >= rds_sk_sndbuf(rs);
-		spin_unlock_irqrestore(&rs->rs_lock, flags);
+		spin_lock_irqsave(&rs->rs_snd_lock, flags);
+		no_space = bufi->rsbi_snd_bytes >= rds_sk_sndbuf(rs);
+		spin_unlock_irqrestore(&rs->rs_snd_lock, flags);
 		if (no_space) {
 			ret = -EAGAIN;
 			goto out;
@@ -1452,7 +1491,7 @@ int rds_sendmsg(struct socket *sock, struct msghdr *msg, size_t payload_len)
 		goto out;
 	}
 	while (!rds_send_queue_rm(rs, conn, cpath, rm, rs->rs_bound_port,
-				  dport, &queued)) {
+				  dport, &queued, bufi)) {
 		rds_stats_inc(s_send_queue_full);
 
 		if (nonblock) {
@@ -1464,7 +1503,7 @@ int rds_sendmsg(struct socket *sock, struct msghdr *msg, size_t payload_len)
 					rds_send_queue_rm(rs, conn, cpath, rm,
 							  rs->rs_bound_port,
 							  dport,
-							  &queued),
+							  &queued, bufi),
 					timeo);
 		rdsdebug("sendmsg woke queued %d timeo %ld\n", queued, timeo);
 		if (timeo > 0 || timeo == MAX_SCHEDULE_TIMEOUT)
