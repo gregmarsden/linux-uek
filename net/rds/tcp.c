@@ -606,7 +606,7 @@ static void rds_tcp_accept_worker(struct work_struct *work)
 
 void rds_tcp_accept_work(struct rds_tcp_net *rtn)
 {
-	queue_work(rds_wq, &rtn->rds_tcp_accept_w);
+	queue_work(rtn->rds_tcp_accept_wq, &rtn->rds_tcp_accept_w);
 }
 
 static __net_init int rds_tcp_init_net(struct net *net)
@@ -618,6 +618,10 @@ static __net_init int rds_tcp_init_net(struct net *net)
 	memset(rtn, 0, sizeof(*rtn));
 
 	mutex_init(&rtn->rds_tcp_accept_lock);
+	rtn->rds_tcp_accept_wq =
+		create_singlethread_workqueue("rds_tcp_accept");
+	if (!rtn->rds_tcp_accept_wq)
+		return -ENOMEM;
 
 	/* {snd, rcv}buf_size default to 0, which implies we let the
 	 * stack pick the value, and permit auto-tuning of buffer size.
@@ -629,7 +633,8 @@ static __net_init int rds_tcp_init_net(struct net *net)
 			      sizeof(rds_tcp_sysctl_table), GFP_KERNEL);
 		if (!tbl) {
 			pr_warn("could not set allocate sysctl table\n");
-			return -ENOMEM;
+			err = -ENOMEM;
+			goto fail_wq;
 		}
 		rtn->ctl_table = tbl;
 	}
@@ -670,6 +675,8 @@ static __net_init int rds_tcp_init_net(struct net *net)
 fail:
 	if (net != &init_net)
 		kfree(tbl);
+fail_wq:
+	destroy_workqueue(rtn->rds_tcp_accept_wq);
 	return err;
 }
 
@@ -713,6 +720,8 @@ static void __net_exit rds_tcp_exit_net(struct net *net)
 		kfree(rtn->ctl_table);
 
 	rds_tcp_kill_sock(net);
+
+	destroy_workqueue(rtn->rds_tcp_accept_wq);
 }
 
 static struct pernet_operations rds_tcp_net_ops = {

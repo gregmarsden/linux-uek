@@ -12,6 +12,7 @@ struct rds_tcp_net {
 	struct mutex		rds_tcp_accept_lock;
 	struct socket		*rds_tcp_listen_sock;
 	struct socket		*rds_tcp_accepted_sock;
+	struct workqueue_struct	*rds_tcp_accept_wq;
 	struct work_struct	rds_tcp_accept_w;
 	struct ctl_table_header	*rds_tcp_sysctl;
 	const struct ctl_table	*ctl_table;

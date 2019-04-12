@@ -462,7 +462,6 @@ void rds_tcp_listen_stop(struct socket *sock, struct work_struct *acceptor)
 	release_sock(sk);
 
 	/* wait for accepts to stop and close the socket */
-	flush_workqueue(rds_wq);
 	flush_work(acceptor);
 	sock_release(sock);
 }
