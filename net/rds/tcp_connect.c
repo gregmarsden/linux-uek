@@ -233,9 +233,12 @@ out:
 void rds_tcp_conn_path_shutdown(struct rds_conn_path *cp)
 {
 	struct rds_tcp_connection *tc = cp->cp_transport_data;
-	struct socket *sock = tc->t_sock;
+	struct socket *sock;
 	struct sock *sk;
 	unsigned int rounds;
+
+	mutex_lock(&tc->t_conn_path_lock);
+	sock = tc->t_sock;
 
 	rdsdebug("shutting down conn %p tc %p sock %p\n",
 		 cp->cp_conn, tc, sock);
@@ -288,6 +291,7 @@ void rds_tcp_conn_path_shutdown(struct rds_conn_path *cp)
 		release_sock(sk);
 		sock_release(sock);
 	}
+	mutex_unlock(&tc->t_conn_path_lock);
 
 	if (tc->t_tinc) {
 		rds_inc_put(&tc->t_tinc->ti_inc);

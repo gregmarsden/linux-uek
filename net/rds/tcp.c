@@ -247,7 +247,6 @@ void rds_tcp_set_callbacks(struct socket *sock, struct rds_conn_path *cp)
 		sock->sk->sk_data_ready = sock->sk->sk_user_data;
 	if (!tc->t_rtn)
 		tc->t_rtn = net_generic(sock_net(sock->sk), rds_tcp_netid);
-	tc->t_cpath = cp;
 	tc->t_orig_data_ready = sock->sk->sk_data_ready;
 	tc->t_orig_write_space = sock->sk->sk_write_space;
 	tc->t_orig_state_change = sock->sk->sk_state_change;
@@ -459,6 +458,7 @@ static int rds_tcp_conn_alloc(struct rds_connection *conn, gfp_t gfp)
 		tc->t_tinc_data_rem = 0;
 		init_waitqueue_head(&tc->t_recv_done_waitq);
 
+		/* Once set, they will never change until the conn is dead. */
 		conn->c_path[i].cp_transport_data = tc;
 		tc->t_cpath = &conn->c_path[i];
 		tc->t_tcp_node_detached = true;
