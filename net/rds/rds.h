@@ -931,6 +931,22 @@ rds_conn_connecting(struct rds_connection *conn)
 	return rds_conn_path_connecting(&conn->c_path[0]);
 }
 
+static inline void
+rds_cond_queue_reconnect_work(struct rds_conn_path *cp, unsigned long delay)
+{
+	if (!test_and_set_bit(RDS_RECONNECT_PENDING, &cp->cp_flags))
+		queue_delayed_work(cp->cp_wq, &cp->cp_conn_w, delay);
+}
+
+static inline void rds_clear_reconnect_pending_work_bit(struct rds_conn_path *cp)
+{
+	/* clear_bit() does not imply a memory barrier */
+	smp_mb__before_atomic();
+	clear_bit(RDS_RECONNECT_PENDING, &cp->cp_flags);
+	/* clear_bit() does not imply a memory barrier */
+	smp_mb__after_atomic();
+}
+
 /* message.c */
 struct rds_message *rds_message_alloc(unsigned int nents, gfp_t gfp);
 struct scatterlist *rds_message_alloc_sgs(struct rds_message *rm, int nents);

@@ -135,12 +135,11 @@ void rds_queue_reconnect(struct rds_conn_path *cp)
 	    rds_addr_cmp(&conn->c_laddr, &conn->c_faddr) >= 0)
 		return;
 
-	set_bit(RDS_RECONNECT_PENDING, &cp->cp_flags);
 	if (cp->cp_reconnect_jiffies == 0) {
 		cp->cp_reconnect_jiffies = rds_sysctl_reconnect_min_jiffies;
 		rcu_read_lock();
 		if (!rds_destroy_pending(cp->cp_conn))
-			queue_delayed_work(cp->cp_wq, &cp->cp_conn_w, 0);
+			rds_cond_queue_reconnect_work(cp, 0);
 		rcu_read_unlock();
 		return;
 	}
@@ -151,8 +150,8 @@ void rds_queue_reconnect(struct rds_conn_path *cp)
 		 conn, &conn->c_laddr, &conn->c_faddr);
 	rcu_read_lock();
 	if (!rds_destroy_pending(cp->cp_conn))
-		queue_delayed_work(cp->cp_wq, &cp->cp_conn_w,
-				   rand % cp->cp_reconnect_jiffies);
+		rds_cond_queue_reconnect_work(cp,
+					      rand % cp->cp_reconnect_jiffies);
 	rcu_read_unlock();
 
 	cp->cp_reconnect_jiffies = min(cp->cp_reconnect_jiffies * 2,
@@ -169,23 +168,18 @@ void rds_connect_worker(struct work_struct *work)
 
 	if (cp->cp_index > 0 &&
 	    rds_addr_cmp(&cp->cp_conn->c_laddr, &cp->cp_conn->c_faddr) >= 0)
-		return;
-	clear_bit(RDS_RECONNECT_PENDING, &cp->cp_flags);
+		goto out;
 	ret = rds_conn_path_transition(cp, RDS_CONN_DOWN, RDS_CONN_CONNECTING);
 	if (ret) {
 		ret = conn->c_trans->conn_path_connect(cp);
 		rdsdebug("conn %p for %pI6c to %pI6c dispatched, ret %d\n",
 			 conn, &conn->c_laddr, &conn->c_faddr, ret);
 
-		if (ret) {
-			if (rds_conn_path_transition(cp,
-						     RDS_CONN_CONNECTING,
-						     RDS_CONN_DOWN))
-				rds_queue_reconnect(cp);
-			else
-				rds_conn_path_error(cp, "connect failed\n");
-		}
+		if (ret)
+			rds_conn_path_error(cp, "connect failed\n");
 	}
+out:
+	rds_clear_reconnect_pending_work_bit(cp);
 }
 
 void rds_send_worker(struct work_struct *work)
