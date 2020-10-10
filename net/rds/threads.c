@@ -121,7 +121,7 @@ EXPORT_SYMBOL_GPL(rds_connect_complete);
  * We should *always* start with a random backoff; otherwise a broken connection
  * will always take several iterations to be re-established.
  */
-void rds_queue_reconnect(struct rds_conn_path *cp)
+void rds_queue_reconnect(struct rds_conn_path *cp, bool immediate)
 {
 	unsigned long rand;
 	struct rds_connection *conn = cp->cp_conn;
@@ -135,7 +135,7 @@ void rds_queue_reconnect(struct rds_conn_path *cp)
 	    rds_addr_cmp(&conn->c_laddr, &conn->c_faddr) >= 0)
 		return;
 
-	if (cp->cp_reconnect_jiffies == 0) {
+	if (immediate || cp->cp_reconnect_jiffies == 0) {
 		cp->cp_reconnect_jiffies = rds_sysctl_reconnect_min_jiffies;
 		rcu_read_lock();
 		if (!rds_destroy_pending(cp->cp_conn))

@@ -509,7 +509,7 @@ void rds_conn_shutdown(struct rds_conn_path *cp)
 		if (conn->c_trans->t_mp_capable &&
 		    cp->cp_index == 0)
 			rds_send_ping(conn, 0);
-		rds_queue_reconnect(cp);
+		rds_queue_reconnect(cp, false);
 	} else {
 		rcu_read_unlock();
 	}
@@ -1025,7 +1025,7 @@ void rds_conn_path_connect_if_down(struct rds_conn_path *cp)
 		return;
 	}
 	if (rds_conn_path_state(cp) == RDS_CONN_DOWN)
-		rds_queue_reconnect(cp);
+		rds_queue_reconnect(cp, true);
 	rcu_read_unlock();
 }
 EXPORT_SYMBOL_GPL(rds_conn_path_connect_if_down);
