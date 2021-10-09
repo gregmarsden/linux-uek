@@ -83,8 +83,80 @@ static atomic_t		rds_cong_generation = ATOMIC_INIT(0);
 /*
  * Congestion monitoring
  */
-static LIST_HEAD(rds_cong_monitor);
-static DEFINE_RWLOCK(rds_cong_monitor_lock);
+
+struct rds_cong_monitor {
+	/* global list of monitoring sockets */
+	struct list_head	rc_monitor;
+	rwlock_t		rc_monitor_lock;
+
+	/* kworker related */
+	spinlock_t		rc_notify_lock;
+	u64			rc_notify_portmask;
+	struct work_struct	rc_notify_work;
+	bool			rc_notify_work_scheduled;
+};
+
+static struct rds_cong_monitor *rds_cong_monitor;
+
+static void rds_cong_notify_worker(struct work_struct *work)
+{
+	u64 portmask;
+	bool qwork = false;
+	unsigned long flags;
+	struct rds_sock *rs;
+
+	/* take snapshot of portmask for processing */
+	spin_lock_bh(&rds_cong_monitor->rc_notify_lock);
+	portmask = rds_cong_monitor->rc_notify_portmask;
+	rds_cong_monitor->rc_notify_portmask = 0;
+	spin_unlock_bh(&rds_cong_monitor->rc_notify_lock);
+
+	read_lock_irqsave(&rds_cong_monitor->rc_monitor_lock, flags);
+	list_for_each_entry(rs, &rds_cong_monitor->rc_monitor, rs_cong_list) {
+		spin_lock(&rs->rs_lock);
+		rs->rs_cong_notify |= (rs->rs_cong_mask & portmask);
+		rs->rs_cong_mask &= ~portmask;
+		spin_unlock(&rs->rs_lock);
+		if (rs->rs_cong_notify)
+			rds_wake_sk_sleep(rs);
+	}
+	read_unlock_irqrestore(&rds_cong_monitor->rc_monitor_lock, flags);
+
+	/* any incoming cong udpates pending? */
+	spin_lock_bh(&rds_cong_monitor->rc_notify_lock);
+	if (rds_cong_monitor->rc_notify_portmask)
+		qwork = true;
+	else
+		rds_cong_monitor->rc_notify_work_scheduled = false;
+	spin_unlock_bh(&rds_cong_monitor->rc_notify_lock);
+
+	if (qwork)
+		queue_work(rds_wq, &rds_cong_monitor->rc_notify_work);
+}
+
+int rds_cong_monitor_init(void)
+{
+	struct rds_cong_monitor *rcm;
+
+	rcm = kzalloc_obj(*rcm);
+	if (!rcm)
+		return -ENOMEM;
+
+	INIT_LIST_HEAD(&rcm->rc_monitor);
+	rwlock_init(&rcm->rc_monitor_lock);
+
+	spin_lock_init(&rcm->rc_notify_lock);
+	INIT_WORK(&rcm->rc_notify_work, rds_cong_notify_worker);
+	rds_cong_monitor = rcm;
+
+	return 0;
+}
+
+void rds_cong_monitor_free(void)
+{
+	cancel_work_sync(&rds_cong_monitor->rc_notify_work);
+	kfree(rds_cong_monitor);
+}
 
 /*
  * Yes, a global lock.  It's used so infrequently that it's worth keeping it
@@ -253,6 +325,8 @@ void rds_cong_queue_updates(struct rds_cong_map *map)
 
 void rds_cong_map_updated(struct rds_cong_map *map, uint64_t portmask)
 {
+	bool qwork = false;
+
 	rdsdebug("waking map %p for %pI4\n",
 	  map, &map->m_addr);
 	rds_stats_inc(s_cong_update_received);
@@ -262,21 +336,20 @@ void rds_cong_map_updated(struct rds_cong_map *map, uint64_t portmask)
 	if (wq_has_sleeper(&rds_poll_waitq))
 		wake_up_all(&rds_poll_waitq);
 
-	if (portmask && !list_empty(&rds_cong_monitor)) {
-		unsigned long flags;
-		struct rds_sock *rs;
+	if (!portmask || list_empty(&rds_cong_monitor->rc_monitor))
+		return;
 
-		read_lock_irqsave(&rds_cong_monitor_lock, flags);
-		list_for_each_entry(rs, &rds_cong_monitor, rs_cong_list) {
-			spin_lock(&rs->rs_lock);
-			rs->rs_cong_notify |= (rs->rs_cong_mask & portmask);
-			rs->rs_cong_mask &= ~portmask;
-			spin_unlock(&rs->rs_lock);
-			if (rs->rs_cong_notify)
-				rds_wake_sk_sleep(rs);
-		}
-		read_unlock_irqrestore(&rds_cong_monitor_lock, flags);
+	/* merge incoming cong udpates into global portmask */
+	spin_lock_bh(&rds_cong_monitor->rc_notify_lock);
+	rds_cong_monitor->rc_notify_portmask |= portmask;
+	if (!rds_cong_monitor->rc_notify_work_scheduled) {
+		rds_cong_monitor->rc_notify_work_scheduled = true;
+		qwork = true;
 	}
+	spin_unlock_bh(&rds_cong_monitor->rc_notify_lock);
+
+	if (qwork)
+		queue_work(rds_wq, &rds_cong_monitor->rc_notify_work);
 }
 EXPORT_SYMBOL_GPL(rds_cong_map_updated);
 
@@ -340,10 +413,10 @@ void rds_cong_add_socket(struct rds_sock *rs)
 {
 	unsigned long flags;
 
-	write_lock_irqsave(&rds_cong_monitor_lock, flags);
+	write_lock_irqsave(&rds_cong_monitor->rc_monitor_lock, flags);
 	if (list_empty(&rs->rs_cong_list))
-		list_add(&rs->rs_cong_list, &rds_cong_monitor);
-	write_unlock_irqrestore(&rds_cong_monitor_lock, flags);
+		list_add(&rs->rs_cong_list, &rds_cong_monitor->rc_monitor);
+	write_unlock_irqrestore(&rds_cong_monitor->rc_monitor_lock, flags);
 }
 
 void rds_cong_remove_socket(struct rds_sock *rs)
@@ -351,9 +424,9 @@ void rds_cong_remove_socket(struct rds_sock *rs)
 	unsigned long flags;
 	struct rds_cong_map *map;
 
-	write_lock_irqsave(&rds_cong_monitor_lock, flags);
+	write_lock_irqsave(&rds_cong_monitor->rc_monitor_lock, flags);
 	list_del_init(&rs->rs_cong_list);
-	write_unlock_irqrestore(&rds_cong_monitor_lock, flags);
+	write_unlock_irqrestore(&rds_cong_monitor->rc_monitor_lock, flags);
 
 	/* update congestion map for now-closed port */
 	spin_lock_irqsave(&rds_cong_lock, flags);

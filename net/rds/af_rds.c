@@ -1033,6 +1033,7 @@ static void rds6_sock_info(struct socket *sock, unsigned int len,
 
 static void rds_exit(void)
 {
+	rds_cong_monitor_free();
 	sock_unregister(rds_family_ops.family);
 	proto_unregister(&rds_proto);
 	rds_conn_exit();
@@ -1090,9 +1091,12 @@ static int __init rds_init(void)
 	ret = rds_stats_init();
 	if (ret)
 		goto out_sysctl;
-	ret = proto_register(&rds_proto, 1);
+	ret = rds_cong_monitor_init();
 	if (ret)
 		goto out_stats;
+	ret = proto_register(&rds_proto, 1);
+	if (ret)
+		goto out_monitor;
 	ret = sock_register(&rds_family_ops);
 	if (ret)
 		goto out_proto;
@@ -1108,6 +1112,8 @@ static int __init rds_init(void)
 
 out_proto:
 	proto_unregister(&rds_proto);
+out_monitor:
+	rds_cong_monitor_free();
 out_stats:
 	rds_stats_exit();
 out_sysctl:
