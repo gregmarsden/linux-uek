@@ -169,6 +169,7 @@ int rds_bind(struct socket *sock, struct sockaddr_unsized *uaddr, int addr_len)
 	__u32 scope_id = 0;
 	int ret = 0;
 	__be16 port;
+	bool release_trans_on_error;
 
 	/* We allow an RDS socket to be bound to either IPv4 or IPv6
 	 * address.
@@ -250,6 +251,7 @@ int rds_bind(struct socket *sock, struct sockaddr_unsized *uaddr, int addr_len)
 			ret = -ENOPROTOOPT;
 			goto out;
 		}
+		release_trans_on_error = false;
 	} else {
 		trans = rds_trans_get_preferred(sock_net(sock->sk),
 						binding_addr, scope_id);
@@ -260,12 +262,15 @@ int rds_bind(struct socket *sock, struct sockaddr_unsized *uaddr, int addr_len)
 			goto out;
 		}
 		rs->rs_transport = trans;
+		release_trans_on_error = true;
 	}
 
 	sock_set_flag(sk, SOCK_RCU_FREE);
 	ret = rds_add_bound(rs, binding_addr, &port, scope_id);
-	if (ret)
+	if (ret && release_trans_on_error) {
+		rds_trans_put(rs->rs_transport);
 		rs->rs_transport = NULL;
+	}
 
 out:
 	release_sock(sk);
