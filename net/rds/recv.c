@@ -573,8 +573,7 @@ int rds_notify_queue_get(struct rds_sock *rs, struct msghdr *msghdr)
  */
 static int rds_notify_cong(struct rds_sock *rs, struct msghdr *msghdr)
 {
-	uint64_t notify = rs->rs_cong_notify;
-	unsigned long flags;
+	u64 notify = atomic64_read(&rs->rs_cong_notify);
 	int err;
 
 	err = put_cmsg(msghdr, SOL_RDS, RDS_CMSG_CONG_UPDATE,
@@ -582,9 +581,7 @@ static int rds_notify_cong(struct rds_sock *rs, struct msghdr *msghdr)
 	if (err)
 		return err;
 
-	spin_lock_irqsave(&rs->rs_lock, flags);
-	rs->rs_cong_notify &= ~notify;
-	spin_unlock_irqrestore(&rs->rs_lock, flags);
+	atomic64_and(~notify, &rs->rs_cong_notify);
 
 	return 0;
 }
@@ -714,7 +711,7 @@ int rds_recvmsg(struct socket *sock, struct msghdr *msg, size_t size,
 			break;
 		}
 
-		if (rs->rs_cong_notify) {
+		if (atomic64_read(&rs->rs_cong_notify)) {
 			ret = rds_notify_cong(rs, msg);
 			break;
 		}
@@ -729,7 +726,7 @@ int rds_recvmsg(struct socket *sock, struct msghdr *msg, size_t size,
 
 			timeo = wait_event_interruptible_timeout(*sk_sleep(sk),
 					(!list_empty(&rs->rs_notify_queue) ||
-					 rs->rs_cong_notify ||
+					 atomic64_read(&rs->rs_cong_notify) ||
 					 rds_next_incoming(rs, &inc)), timeo);
 			rdsdebug("recvmsg woke inc %p timeo %ld\n", inc,
 				 timeo);

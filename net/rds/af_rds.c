@@ -242,10 +242,8 @@ static __poll_t rds_poll(struct file *file, struct socket *sock,
 		if (rds_cong_updated_since(&rs->rs_cong_track))
 			mask |= (EPOLLIN | EPOLLRDNORM | EPOLLWRBAND);
 	} else {
-		spin_lock(&rs->rs_lock);
-		if (rs->rs_cong_notify)
+		if (atomic64_read(&rs->rs_cong_notify))
 			mask |= (EPOLLIN | EPOLLRDNORM);
-		spin_unlock(&rs->rs_lock);
 	}
 	if (!list_empty(&rs->rs_recv_queue) ||
 	    !list_empty(&rs->rs_notify_queue) ||
@@ -371,8 +369,8 @@ static int rds_cong_monitor(struct rds_sock *rs, sockptr_t optval, int optlen)
 			rds_cong_add_socket(rs);
 		} else {
 			rds_cong_remove_socket(rs);
-			rs->rs_cong_mask = 0;
-			rs->rs_cong_notify = 0;
+			atomic64_set(&rs->rs_cong_mask, 0);
+			atomic64_set(&rs->rs_cong_notify, 0);
 		}
 	}
 	return ret;
