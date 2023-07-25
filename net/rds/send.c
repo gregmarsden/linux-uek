@@ -1182,7 +1182,9 @@ int rds_sendmsg(struct socket *sock, struct msghdr *msg, size_t payload_len)
 
 	/* Mirror Linux UDP mirror of BSD error message compatibility */
 	/* XXX: Perhaps MSG_MORE someday */
-	if (msg->msg_flags & ~(MSG_DONTWAIT | MSG_CMSG_COMPAT | MSG_ZEROCOPY)) {
+	if (msg->msg_flags & ~(MSG_DONTWAIT | MSG_CMSG_COMPAT |
+			       MSG_ZEROCOPY | MSG_NOSIGNAL)) {
+		pr_debug_ratelimited("%s: msg_flags 0x%08X\n", __func__, msg->msg_flags);
 		ret = -EOPNOTSUPP;
 		goto out;
 	}
