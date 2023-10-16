@@ -740,6 +740,7 @@ static void rds_sock_inc_info(struct socket *sock, unsigned int len,
 	struct rds_sock *rs;
 	struct rds_incoming *inc;
 	unsigned int total = 0;
+	unsigned long flags;
 
 	len /= sizeof(struct rds_info_message);
 
@@ -753,7 +754,7 @@ static void rds_sock_inc_info(struct socket *sock, unsigned int len,
 		if (!ipv6_addr_v4mapped(&rs->rs_bound_addr))
 			continue;
 
-		read_lock(&rs->rs_recv_lock);
+		read_lock_irqsave(&rs->rs_recv_lock, flags);
 
 		/* XXX too lazy to maintain counts.. */
 		list_for_each_entry(inc, &rs->rs_recv_queue, i_item) {
@@ -765,7 +766,7 @@ static void rds_sock_inc_info(struct socket *sock, unsigned int len,
 						  1);
 		}
 
-		read_unlock(&rs->rs_recv_lock);
+		read_unlock_irqrestore(&rs->rs_recv_lock, flags);
 	}
 
 	spin_unlock_bh(&rds_sock_lock);
@@ -783,6 +784,7 @@ static void rds6_sock_inc_info(struct socket *sock, unsigned int len,
 	struct rds_incoming *inc;
 	unsigned int total = 0;
 	struct rds_sock *rs;
+	unsigned long flags;
 
 	len /= sizeof(struct rds6_info_message);
 
@@ -792,7 +794,7 @@ static void rds6_sock_inc_info(struct socket *sock, unsigned int len,
 		/* Only show sockets in the caller's netns. */
 		if (!net_eq(sock_net(rds_rs_to_sk(rs)), net))
 			continue;
-		read_lock(&rs->rs_recv_lock);
+		read_lock_irqsave(&rs->rs_recv_lock, flags);
 
 		list_for_each_entry(inc, &rs->rs_recv_queue, i_item) {
 			total++;
@@ -801,7 +803,7 @@ static void rds6_sock_inc_info(struct socket *sock, unsigned int len,
 						   &rs->rs_bound_addr, 1);
 		}
 
-		read_unlock(&rs->rs_recv_lock);
+		read_unlock_irqrestore(&rs->rs_recv_lock, flags);
 	}
 
 	spin_unlock_bh(&rds_sock_lock);
