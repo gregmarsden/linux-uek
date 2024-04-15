@@ -125,6 +125,7 @@ void rds_queue_reconnect(struct rds_conn_path *cp, bool immediate)
 {
 	unsigned long rand;
 	struct rds_connection *conn = cp->cp_conn;
+	time64_t now_mono = ktime_get_seconds();
 
 	rdsdebug("conn %p for %pI6c to %pI6c reconnect jiffies %lu\n",
 		 conn, &conn->c_laddr, &conn->c_faddr,
@@ -137,6 +138,7 @@ void rds_queue_reconnect(struct rds_conn_path *cp, bool immediate)
 
 	if (immediate || cp->cp_reconnect_jiffies == 0) {
 		cp->cp_reconnect_jiffies = rds_sysctl_reconnect_min_jiffies;
+		cp->cp_connection_backoff_start = now_mono;
 		rcu_read_lock();
 		if (!rds_destroy_pending(cp->cp_conn))
 			rds_cond_queue_reconnect_work(cp, 0);
@@ -151,9 +153,28 @@ void rds_queue_reconnect(struct rds_conn_path *cp, bool immediate)
 	rcu_read_lock();
 	if (!rds_destroy_pending(cp->cp_conn) &&
 	    rds_cond_queue_reconnect_work(cp,
-					  rand % cp->cp_reconnect_jiffies))
-		cp->cp_reconnect_jiffies = min(cp->cp_reconnect_jiffies * 2,
-					       rds_sysctl_reconnect_max_jiffies);
+					  rand % cp->cp_reconnect_jiffies)) {
+		unsigned long max_jiffies, fuzz_jiffies;
+		unsigned int max_interval_msecs;
+
+		if (rds_sysctl_reconnect_backoff_after_secs &&
+		    ktime_after(now_mono, cp->cp_connection_backoff_start +
+				rds_sysctl_reconnect_backoff_after_secs)) {
+			max_interval_msecs =
+				rds_sysctl_reconnect_backoff_max_interval_secs *
+				MSEC_PER_SEC;
+			max_jiffies = max(msecs_to_jiffies(max_interval_msecs),
+					  rds_sysctl_reconnect_max_jiffies);
+			fuzz_jiffies = get_random_u32_below(HZ);
+		} else {
+			max_jiffies = rds_sysctl_reconnect_max_jiffies;
+			fuzz_jiffies = 0;
+		}
+
+		cp->cp_reconnect_jiffies =
+			min(cp->cp_reconnect_jiffies * 2 + fuzz_jiffies,
+			    max_jiffies);
+	}
 	rcu_read_unlock();
 }
 

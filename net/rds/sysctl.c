@@ -44,6 +44,9 @@ static unsigned long rds_sysctl_reconnect_max = ~0UL;
 unsigned long rds_sysctl_reconnect_min_jiffies;
 unsigned long rds_sysctl_reconnect_max_jiffies = HZ;
 
+unsigned int rds_sysctl_reconnect_backoff_after_secs = 600;
+unsigned int rds_sysctl_reconnect_backoff_max_interval_secs = 600;
+
 unsigned int  rds_sysctl_max_unacked_packets = 8;
 unsigned int  rds_sysctl_max_unacked_bytes = (16 << 20);
 
@@ -71,6 +74,20 @@ static struct ctl_table rds_sysctl_rds_table[] = {
 		.proc_handler   = proc_doulongvec_ms_jiffies_minmax,
 		.extra1		= &rds_sysctl_reconnect_min_jiffies,
 		.extra2		= &rds_sysctl_reconnect_max,
+	},
+	{
+		.procname       = "reconnect_backoff_after_secs",
+		.data		= &rds_sysctl_reconnect_backoff_after_secs,
+		.maxlen         = sizeof(rds_sysctl_reconnect_backoff_after_secs),
+		.mode           = 0644,
+		.proc_handler   = proc_douintvec,
+	},
+	{
+		.procname       = "reconnect_backoff_max_interval_secs",
+		.data		= &rds_sysctl_reconnect_backoff_max_interval_secs,
+		.maxlen         = sizeof(rds_sysctl_reconnect_backoff_max_interval_secs),
+		.mode           = 0644,
+		.proc_handler   = proc_douintvec,
 	},
 	{
 		.procname	= "max_unacked_packets",

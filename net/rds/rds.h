@@ -133,6 +133,7 @@ struct rds_conn_path {
 	unsigned int		cp_unacked_packets;
 	unsigned int		cp_unacked_bytes;
 	unsigned int		cp_index;
+	time64_t		cp_connection_backoff_start;
 };
 
 /* One rds_connection per RDS address pair */
@@ -1086,6 +1087,8 @@ extern unsigned long rds_sysctl_sndbuf_default;
 extern unsigned long rds_sysctl_sndbuf_max;
 extern unsigned long rds_sysctl_reconnect_min_jiffies;
 extern unsigned long rds_sysctl_reconnect_max_jiffies;
+extern unsigned int  rds_sysctl_reconnect_backoff_after_secs;
+extern unsigned int  rds_sysctl_reconnect_backoff_max_interval_secs;
 extern unsigned int  rds_sysctl_max_unacked_packets;
 extern unsigned int  rds_sysctl_max_unacked_bytes;
 extern unsigned int  rds_sysctl_ping_enable;
