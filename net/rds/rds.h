@@ -932,14 +932,30 @@ rds_conn_connecting(struct rds_connection *conn)
 	return rds_conn_path_connecting(&conn->c_path[0]);
 }
 
+/* sysctl.c */
+extern unsigned long rds_sysctl_reconnect_max_jiffies;
+
 static inline bool
 rds_cond_queue_reconnect_work(struct rds_conn_path *cp, unsigned long delay)
 {
+	unsigned long mod_delay = max(delay, rds_sysctl_reconnect_max_jiffies);
+
 	if (!test_and_set_bit(RDS_RECONNECT_PENDING, &cp->cp_flags)) {
 		queue_delayed_work(cp->cp_wq, &cp->cp_conn_w, delay);
 		return true;
+	} else if (timer_pending(&cp->cp_conn_w.timer) &&
+		   time_after(READ_ONCE(cp->cp_conn_w.timer.expires),
+			      jiffies + mod_delay)) {
+		/* mod_delayed_work due to an immediate sendmsg()
+		 * by always allowing shortening the delay,
+		 * if the existing reconnect timer expires later
+		 * than reconnect_max_delay_ms (1s).
+		 */
+		mod_delayed_work(cp->cp_wq, &cp->cp_conn_w, mod_delay);
+		return true;
+	} else {
+		return false;
 	}
-	return false;
 }
 
 static inline void rds_clear_reconnect_pending_work_bit(struct rds_conn_path *cp)
@@ -1086,7 +1102,6 @@ extern unsigned long rds_sysctl_sndbuf_min;
 extern unsigned long rds_sysctl_sndbuf_default;
 extern unsigned long rds_sysctl_sndbuf_max;
 extern unsigned long rds_sysctl_reconnect_min_jiffies;
-extern unsigned long rds_sysctl_reconnect_max_jiffies;
 extern unsigned int  rds_sysctl_reconnect_backoff_after_secs;
 extern unsigned int  rds_sysctl_reconnect_backoff_max_interval_secs;
 extern unsigned int  rds_sysctl_max_unacked_packets;

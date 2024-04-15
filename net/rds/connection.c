@@ -1014,8 +1014,8 @@ void rds_conn_drop(struct rds_connection *conn)
 EXPORT_SYMBOL_GPL(rds_conn_drop);
 
 /*
- * If the connection is down, trigger a connect. We may have scheduled a
- * delayed reconnect however - in this case we should not interfere.
+ * If the connection is down, trigger a connect. A new request can shorten
+ * a pending reconnect delay.
  */
 void rds_conn_path_connect_if_down(struct rds_conn_path *cp)
 {
