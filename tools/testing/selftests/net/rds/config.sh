@@ -59,6 +59,15 @@ scripts/config "${FLAGS[@]}" --enable CONFIG_VETH
 # simulate packet loss
 scripts/config "${FLAGS[@]}" --enable CONFIG_NET_SCH_NETEM
 
+# Verify that a congestion update remains pending after its GFP_NOWAIT
+# allocation fails.
+scripts/config "${FLAGS[@]}" --enable CONFIG_DEBUG_FS
+scripts/config "${FLAGS[@]}" --enable CONFIG_KPROBES
+scripts/config "${FLAGS[@]}" --enable CONFIG_FUNCTION_ERROR_INJECTION
+scripts/config "${FLAGS[@]}" --enable CONFIG_FAULT_INJECTION
+scripts/config "${FLAGS[@]}" --enable CONFIG_FAULT_INJECTION_DEBUG_FS
+scripts/config "${FLAGS[@]}" --enable CONFIG_FAIL_FUNCTION
+
 if [ "$ENABLE_RDMA" -eq 1 ]; then
 	# enable RDS over InfiniBand / RDMA (rds_rdma test)
 	scripts/config "${FLAGS[@]}" --enable CONFIG_INFINIBAND

@@ -8,6 +8,7 @@ TEST_PROGS := rds_run.sh
 TEST_GEN_PROGS := getsockopt
 
 TEST_FILES := \
+	cong_test.py \
 	include.sh \
 	settings \
 	test.py \

@@ -18,6 +18,30 @@ peer namespaces on independent veth paths.  It stalls one established
 RDS/TCP connection and verifies that it cannot consume the send-buffer space
 assigned to a healthy peer on the same socket.
 
+The congestion-update retry test must run on two separate kernels.  RDS
+congestion maps are global within one kernel, so network namespaces cannot
+isolate the sender's remote map from the receiver's local map.  cong_test.py
+provides sender and receiver roles for a manual two-node test.  The receiver
+uses function fault injection to fail congestion-update allocations; this
+requires CONFIG_FAIL_FUNCTION and debugfs mounted at /sys/kernel/debug.
+
+Configure one interface on each node with addresses on the same subnet.  With
+10.23.0.1 on the sender and 10.23.0.2 on the receiver, start the receiver first:
+
+    # receiver node
+    python3 tools/testing/selftests/net/rds/cong_test.py receiver
+
+Then start the sender:
+
+    # sender node
+    python3 tools/testing/selftests/net/rds/cong_test.py sender
+
+Both processes print PASS when the receiver retries the failed update and the
+sender receives the congestion and uncongested notifications.  Without the
+retry fix, the sender fails with "remote congestion was not observed after
+allocation failures".  Use --sender-address and --receiver-address to select
+different addresses.
+
 USAGE:
 	rds_run.sh [-d logdir] [-l packet_loss] [-c packet_corruption]
 	           [-u packet_duplicate] [-t timeout]

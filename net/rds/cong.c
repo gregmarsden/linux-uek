@@ -34,6 +34,7 @@
 #include <linux/types.h>
 #include <linux/rbtree.h>
 #include <linux/bitops.h>
+#include <linux/error-injection.h>
 #include <linux/export.h>
 
 #include "rds.h"
@@ -494,3 +495,4 @@ struct rds_message *rds_cong_update_alloc(struct rds_connection *conn)
 
 	return rm;
 }
+ALLOW_ERROR_INJECTION(rds_cong_update_alloc, ERRNO);
