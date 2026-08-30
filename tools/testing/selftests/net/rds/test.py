@@ -43,6 +43,10 @@ tcp_addrs = [
     ('10.0.0.2', 20000),
 ]
 
+PEER_TX_ADDR = '10.23.0.1'
+PEER_SLOW_ADDR = '10.23.0.2'
+PEER_FAST_ADDR = '10.23.0.3'
+
 # RDMA network configs
 RXE_DEV0 = 'rxe0'
 RXE_DEV1 = 'rxe1'
@@ -111,6 +115,175 @@ def netns_socket(netns, *sock_args):
         raise RuntimeError(
             f"netns_socket child failed in netns {netns} (status={status})")
     return socket.fromfd(fds[0], *sock_args)
+
+class PeerTopology:
+    """One sender namespace and two peers on independent veth paths."""
+
+    def __init__(self):
+        suffix = str(os.getpid())
+        self.tx_ns = f'rds-tx-{suffix}'
+        self.slow_ns = f'rds-slow-{suffix}'
+        self.fast_ns = f'rds-fast-{suffix}'
+        self.tx_slow_dev = f'rtxs{suffix}'
+        self.slow_dev = f'rslow{suffix}'
+        self.tx_fast_dev = f'rtxf{suffix}'
+        self.fast_dev = f'rfast{suffix}'
+
+    @property
+    def namespaces(self):
+        return (self.tx_ns, self.slow_ns, self.fast_ns)
+
+    def cleanup(self):
+        for netns in self.namespaces:
+            cmd(f'ip netns del {netns}', fail=False)
+
+    def setup(self):
+        self.cleanup()
+        try:
+            for netns in self.namespaces:
+                ip(f'netns add {netns}')
+                ip(f'-n {netns} link set lo up')
+
+            ip(f'link add {self.tx_slow_dev} type veth '
+               f'peer name {self.slow_dev}')
+            ip(f'link set {self.tx_slow_dev} netns {self.tx_ns}')
+            ip(f'link set {self.slow_dev} netns {self.slow_ns}')
+
+            ip(f'link add {self.tx_fast_dev} type veth '
+               f'peer name {self.fast_dev}')
+            ip(f'link set {self.tx_fast_dev} netns {self.tx_ns}')
+            ip(f'link set {self.fast_dev} netns {self.fast_ns}')
+
+            ip(f'-n {self.tx_ns} addr add {PEER_TX_ADDR}/32 dev lo')
+            ip(f'-n {self.slow_ns} addr add {PEER_SLOW_ADDR}/32 '
+               f'dev {self.slow_dev}')
+            ip(f'-n {self.fast_ns} addr add {PEER_FAST_ADDR}/32 '
+               f'dev {self.fast_dev}')
+
+            for netns, dev in ((self.tx_ns, self.tx_slow_dev),
+                               (self.slow_ns, self.slow_dev),
+                               (self.tx_ns, self.tx_fast_dev),
+                               (self.fast_ns, self.fast_dev)):
+                ip(f'-n {netns} link set {dev} up')
+
+            ip(f'-n {self.tx_ns} route add {PEER_SLOW_ADDR}/32 '
+               f'dev {self.tx_slow_dev} src {PEER_TX_ADDR}')
+            ip(f'-n {self.tx_ns} route add {PEER_FAST_ADDR}/32 '
+               f'dev {self.tx_fast_dev} src {PEER_TX_ADDR}')
+            ip(f'-n {self.slow_ns} route add {PEER_TX_ADDR}/32 '
+               f'dev {self.slow_dev}')
+            ip(f'-n {self.fast_ns} route add {PEER_TX_ADDR}/32 '
+               f'dev {self.fast_dev}')
+        except BaseException:
+            self.cleanup()
+            raise
+
+    def __enter__(self):
+        self.setup()
+        return self
+
+    def __exit__(self, _exc_type, _exc_value, _traceback):
+        self.cleanup()
+
+def bound_tcp_socket(netns, address, port, *, sndbuf=None, rcvbuf=None):
+    """Create, configure, and bind a nonblocking RDS/TCP socket."""
+    sock = netns_socket(netns, socket.AF_RDS, socket.SOCK_SEQPACKET)
+    try:
+        sock.setsockopt(SOL_RDS, SO_RDS_TRANSPORT, RDS_TRANS_TCP)
+        if sndbuf is not None:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, sndbuf)
+        if rcvbuf is not None:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
+        sock.bind((address, port))
+        sock.setblocking(False)
+        return sock
+    except BaseException:
+        sock.close()
+        raise
+
+def recv_payload(sock, expected, timeout=10):
+    """Wait for and verify one payload."""
+    deadline = time.monotonic() + timeout
+
+    while True:
+        try:
+            payload, _ = sock.recvfrom(max(len(expected), 1) + 64)
+        except BlockingIOError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError('timed out waiting for an RDS payload')
+            select.select([sock], [], [], remaining)
+            continue
+
+        if payload != expected:
+            raise RuntimeError(
+                f'payload mismatch: expected {expected!r}, received {payload!r}')
+        return
+
+def send_payload(sock, payload, destination, timeout=10):
+    """Retry a nonblocking send while connection setup is in progress."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            sent = sock.sendto(payload, destination)
+            if sent != len(payload):
+                raise RuntimeError(f'short RDS send: {sent}/{len(payload)}')
+            return
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                raise RuntimeError('timed out queuing an RDS payload')
+            time.sleep(0.01)
+
+def test_per_peer_send_buffer():
+    """A stalled peer must not consume another peer's send-buffer space."""
+    with PeerTopology() as topo:
+        tx = bound_tcp_socket(topo.tx_ns, PEER_TX_ADDR, 4200, sndbuf=32768)
+        slow = bound_tcp_socket(topo.slow_ns, PEER_SLOW_ADDR, 5200)
+        fast = bound_tcp_socket(topo.fast_ns, PEER_FAST_ADDR, 5300)
+        try:
+            send_payload(tx, b'slow-warmup', (PEER_SLOW_ADDR, 5200))
+            recv_payload(slow, b'slow-warmup')
+            send_payload(tx, b'fast-warmup', (PEER_FAST_ADDR, 5300))
+            recv_payload(fast, b'fast-warmup')
+
+            ip(f'-n {topo.slow_ns} link set {topo.slow_dev} down')
+
+            payload = b's' * 4096
+            deadline = time.monotonic() + 15
+            queued = 0
+            while time.monotonic() < deadline:
+                try:
+                    tx.sendto(payload, (PEER_SLOW_ADDR, 5200))
+                    queued += 1
+                except BlockingIOError:
+                    break
+                except OSError as exc:
+                    if exc.errno in (errno.ENOBUFS, errno.ENETUNREACH,
+                                     errno.ECONNRESET, errno.EPIPE):
+                        time.sleep(0.01)
+                        continue
+                    raise
+            else:
+                raise RuntimeError('could not fill the stalled peer buffer')
+
+            if queued == 0:
+                raise RuntimeError('no messages queued to the stalled peer')
+
+            marker = b'healthy-peer'
+            try:
+                sent = tx.sendto(marker, (PEER_FAST_ADDR, 5300))
+            except BlockingIOError as exc:
+                raise RuntimeError(
+                    'stalled peer exhausted the healthy peer buffer') from exc
+            if sent != len(marker):
+                raise RuntimeError(f'short healthy-peer send: {sent}')
+            recv_payload(fast, marker)
+        finally:
+            tx.close()
+            slow.close()
+            fast.close()
+
+    return 0
 
 def send_burst(socks, ip_addrs, snd_hashes, nr_sent, nr_total):
     """Send until blocked or nr_total reached. Return updated nr_sent."""
@@ -528,7 +701,7 @@ if 'rdma' in transports:
     }
 
 print("TAP version 13")
-print(f"1..{len(transport_envs)}")
+print(f"1..{len(transport_envs) + ('tcp' in transports)}")
 
 for transport, tenv in transport_envs.items():
     tap_idx += 1
@@ -550,6 +723,30 @@ for transport, tenv in transport_envs.items():
         nr_pass += 1
     else:
         print(f"not ok {tap_idx} rds selftest {transport}")
+        nr_fail += 1
+
+if 'tcp' in transports:
+    tap_idx += 1
+    signal_handler_label = 'tcp per-peer send buffer'
+
+    if args.timeout > 0:
+        signal.alarm(args.timeout)
+        signal.signal(signal.SIGALRM, signal_handler)
+
+    try:
+        ret = test_per_peer_send_buffer()
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        ksft_pr(f'FAIL: {exc}')
+        ret = 1
+
+    signal.alarm(0)
+
+    if ret == 0:
+        ksft_pr('Success')
+        print(f'ok {tap_idx} rds selftest {signal_handler_label}')
+        nr_pass += 1
+    else:
+        print(f'not ok {tap_idx} rds selftest {signal_handler_label}')
         nr_fail += 1
 
 ksft_pr(f"Totals: pass:{nr_pass} fail:{nr_fail} skip:0")

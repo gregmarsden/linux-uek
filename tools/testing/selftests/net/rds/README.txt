@@ -13,6 +13,11 @@ with the necessary gcov options; pass -r to also enable the kernel
 configs required for the RDMA transport.  The kernel may optionally be
 configured to omit the coverage report as well.
 
+When the TCP transport is selected, test.py also creates one sender and two
+peer namespaces on independent veth paths.  It stalls one established
+RDS/TCP connection and verifies that it cannot consume the send-buffer space
+assigned to a healthy peer on the same socket.
+
 USAGE:
 	rds_run.sh [-d logdir] [-l packet_loss] [-c packet_corruption]
 	           [-u packet_duplicate] [-t timeout]
@@ -74,4 +79,3 @@ EXAMPLE:
          export SUDO_USER=example_user; \
          export RDS_LOG_DIR=tools/testing/selftests/net/rds/rds_logs; \
          tools/testing/selftests/net/rds/rds_run.sh -T tcp,rdma"
-
