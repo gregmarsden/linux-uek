@@ -973,7 +973,7 @@ out:
  * rds_message is getting to be quite complicated, and we'd like to allocate
  * it all in one go. This figures out how big it needs to be up front.
  */
-static int rds_rm_size(struct msghdr *msg, int num_sgs,
+static int rds_rm_size(struct rds_sock *rs, struct msghdr *msg, int num_sgs,
 		       struct rds_iov_vector_arr *vct)
 {
 	struct cmsghdr *cmsg;
@@ -997,6 +997,8 @@ static int rds_rm_size(struct msghdr *msg, int num_sgs,
 		case RDS_CMSG_RDMA_ARGS:
 			if (cmsg->cmsg_len < CMSG_LEN(sizeof(struct rds_rdma_args)))
 				return -EINVAL;
+			if (rs->rs_transport->t_type == RDS_TRANS_TCP)
+				return -EOPNOTSUPP;
 			if (vct->indx >= vct->len) {
 				vct->len += vct->incr;
 				tmp_iov = krealloc_array(vct->vec, vct->len,
@@ -1020,10 +1022,13 @@ static int rds_rm_size(struct msghdr *msg, int num_sgs,
 
 		case RDS_CMSG_ZCOPY_COOKIE:
 			zcopy_cookie = true;
-			fallthrough;
+			cmsg_groups |= 2;
+			break;
 
 		case RDS_CMSG_RDMA_DEST:
 		case RDS_CMSG_RDMA_MAP:
+			if (rs->rs_transport->t_type == RDS_TRANS_TCP)
+				return -EOPNOTSUPP;
 			cmsg_groups |= 2;
 			/* these are valid but do no add any size */
 			break;
@@ -1032,6 +1037,8 @@ static int rds_rm_size(struct msghdr *msg, int num_sgs,
 		case RDS_CMSG_ATOMIC_FADD:
 		case RDS_CMSG_MASKED_ATOMIC_CSWP:
 		case RDS_CMSG_MASKED_ATOMIC_FADD:
+			if (rs->rs_transport->t_type == RDS_TRANS_TCP)
+				return -EOPNOTSUPP;
 			cmsg_groups |= 1;
 			size += sizeof(struct scatterlist);
 			break;
@@ -1128,7 +1135,8 @@ static int rds_cmsg_send(struct rds_sock *rs, struct rds_message *rm,
 	return ret;
 }
 
-static int rds_rdma_bytes(struct msghdr *msg, size_t *rdma_bytes)
+static int rds_rdma_bytes(struct rds_sock *rs, struct msghdr *msg,
+			  size_t *rdma_bytes)
 {
 	struct rds_rdma_args *args;
 	struct cmsghdr *cmsg;
@@ -1144,6 +1152,8 @@ static int rds_rdma_bytes(struct msghdr *msg, size_t *rdma_bytes)
 			if (cmsg->cmsg_len <
 			    CMSG_LEN(sizeof(struct rds_rdma_args)))
 				return -EINVAL;
+			if (rs->rs_transport->t_type == RDS_TRANS_TCP)
+				return -EOPNOTSUPP;
 			args = CMSG_DATA(cmsg);
 			*rdma_bytes += args->remote_vec.bytes;
 		}
@@ -1294,7 +1304,7 @@ int rds_sendmsg(struct socket *sock, struct msghdr *msg, size_t payload_len)
 	}
 	release_sock(sk);
 
-	ret = rds_rdma_bytes(msg, &rdma_payload_len);
+	ret = rds_rdma_bytes(rs, msg, &rdma_payload_len);
 	if (ret)
 		goto out;
 
@@ -1316,7 +1326,7 @@ int rds_sendmsg(struct socket *sock, struct msghdr *msg, size_t payload_len)
 		num_sgs = iov_iter_npages(&msg->msg_iter, INT_MAX);
 	}
 	/* size of rm including all sgs */
-	ret = rds_rm_size(msg, num_sgs, &vct);
+	ret = rds_rm_size(rs, msg, num_sgs, &vct);
 	if (ret < 0)
 		goto out;
 
