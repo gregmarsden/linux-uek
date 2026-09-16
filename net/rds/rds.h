@@ -931,11 +931,14 @@ rds_conn_connecting(struct rds_connection *conn)
 	return rds_conn_path_connecting(&conn->c_path[0]);
 }
 
-static inline void
+static inline bool
 rds_cond_queue_reconnect_work(struct rds_conn_path *cp, unsigned long delay)
 {
-	if (!test_and_set_bit(RDS_RECONNECT_PENDING, &cp->cp_flags))
+	if (!test_and_set_bit(RDS_RECONNECT_PENDING, &cp->cp_flags)) {
 		queue_delayed_work(cp->cp_wq, &cp->cp_conn_w, delay);
+		return true;
+	}
+	return false;
 }
 
 static inline void rds_clear_reconnect_pending_work_bit(struct rds_conn_path *cp)

@@ -149,13 +149,12 @@ void rds_queue_reconnect(struct rds_conn_path *cp)
 		 rand % cp->cp_reconnect_jiffies, cp->cp_reconnect_jiffies,
 		 conn, &conn->c_laddr, &conn->c_faddr);
 	rcu_read_lock();
-	if (!rds_destroy_pending(cp->cp_conn))
-		rds_cond_queue_reconnect_work(cp,
-					      rand % cp->cp_reconnect_jiffies);
+	if (!rds_destroy_pending(cp->cp_conn) &&
+	    rds_cond_queue_reconnect_work(cp,
+					  rand % cp->cp_reconnect_jiffies))
+		cp->cp_reconnect_jiffies = min(cp->cp_reconnect_jiffies * 2,
+					       rds_sysctl_reconnect_max_jiffies);
 	rcu_read_unlock();
-
-	cp->cp_reconnect_jiffies = min(cp->cp_reconnect_jiffies * 2,
-					rds_sysctl_reconnect_max_jiffies);
 }
 
 void rds_connect_worker(struct work_struct *work)
